@@ -322,6 +322,57 @@ def is_domain_in_sites_list(domain: str, sites_list: LlmsSitesList) -> Optional[
             return site
     return None
 
+async def extract_website_metadata(domain: str) -> str:
+    """
+    Extract metadata from a website's homepage to create a meaningful description.
+
+    Args:
+        domain: Domain to fetch metadata from
+
+    Returns:
+        Description string based on metadata
+    """
+    url = f"https://{domain}"
+    try:
+        # Force raw to get the HTML content
+        content, _ = await fetch_page(url, force_raw=True)
+        soup = BeautifulSoup(content, 'html.parser')
+
+        # Extract potential metadata in order of preference
+        description = soup.find('meta', attrs={'name': 'description'})
+        og_description = soup.find('meta', attrs={'property': 'og:description'}) or soup.find('meta', attrs={'name': 'og:description'})
+        twitter_description = soup.find('meta', attrs={'property': 'twitter:description'}) or soup.find('meta', attrs={'name': 'twitter:description'})
+
+        # Get the site title
+        title_tag = soup.find('title')
+        title_meta = soup.find('meta', attrs={'property': 'og:title'}) or soup.find('meta', attrs={'name': 'og:title'})
+
+        # Build description from available metadata
+        result = []
+
+        # Add title if available
+        if title_tag:
+            result.append(title_tag.text.strip())
+        elif title_meta and title_meta.get('content'):
+            result.append(title_meta['content'].strip())
+
+        # Add description if available
+        if description and description.get('content'):
+            result.append(description['content'].strip())
+        elif og_description and og_description.get('content'):
+            result.append(og_description['content'].strip())
+        elif twitter_description and twitter_description.get('content'):
+            result.append(twitter_description['content'].strip())
+
+        if result:
+            return " - ".join(result)
+        else:
+            return f"Website with llms.txt support at {domain}"
+
+    except Exception as e:
+        logger.error(f"Error extracting metadata from {domain}: {e}")
+        return f"Website with llms.txt support at {domain}"
+
 async def check_llms_support(url_or_domain: str) -> Dict:
     """Check if a website supports llms.txt."""
     # Determine if it's a URL or domain
@@ -353,11 +404,14 @@ async def check_llms_support(url_or_domain: str) -> Dict:
                 follow_redirects=True
             )
             if response.status_code < 400:
+                # Get metadata for better description
+                description = await extract_website_metadata(domain)
+
                 # Add to sites list
                 new_site = LlmsSiteEntry(
                     domain=domain,
                     llmsTxtUrl=url,
-                    description=f"Discovered llms.txt support for {domain}"
+                    description=description
                 )
                 sites_list.sites.append(new_site)
                 save_sites_list(sites_list)
@@ -367,7 +421,7 @@ async def check_llms_support(url_or_domain: str) -> Dict:
                     "domain": domain,
                     "llmsTxtUrl": url,
                     "fromKnownList": False,
-                    "description": f"Discovered llms.txt support for {domain}"
+                    "description": description
                 }
             else:
                 return {

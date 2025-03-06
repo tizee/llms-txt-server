@@ -13,9 +13,10 @@ from llms_txt_server.server import (
     check_llms_support,
     initialize_sites_list,
     save_sites_list,
-    fetch_page,  # Add import for the new fetch_page function
+    fetch_page,
     LlmsSitesList,
-    LlmsSiteEntry
+    LlmsSiteEntry,
+    extract_website_metadata
 )
 
 # Mock data for testing
@@ -215,3 +216,36 @@ async def test_fetch_page():
         content, message = await fetch_page(url, force_raw=True)
         assert content == MOCK_LLMS_TXT
         assert "text/plain" in message
+
+# Test the extract_website_metadata function
+@pytest.mark.asyncio
+async def test_extract_website_metadata():
+    domain = "example.com"
+    mock_html = """
+    <html>
+    <head>
+        <title>Example Website</title>
+        <meta name="description" content="This is an example website for testing">
+        <meta property="og:description" content="Example website OpenGraph description">
+    </head>
+    <body>
+        <h1>Welcome to Example</h1>
+    </body>
+    </html>
+    """
+
+    with mock.patch('llms_txt_server.server.fetch_page') as mock_fetch:
+        mock_fetch.return_value = (mock_html, "")
+
+        # Test with standard metadata
+        description = await extract_website_metadata(domain)
+        assert "Example Website" in description
+        assert "This is an example website for testing" in description
+        mock_fetch.assert_called_once_with(f"https://{domain}", force_raw=True)
+
+    # Test with missing metadata
+    with mock.patch('llms_txt_server.server.fetch_page') as mock_fetch:
+        mock_fetch.return_value = ("<html><body>No metadata</body></html>", "")
+
+        description = await extract_website_metadata(domain)
+        assert f"Website with llms.txt support at {domain}" in description
