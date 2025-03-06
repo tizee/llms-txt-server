@@ -1,8 +1,6 @@
 import os
 import json
 import logging
-import urllib.parse
-from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 from urllib.parse import urlparse
 from abc import ABC, abstractmethod
@@ -13,12 +11,19 @@ from markdownify import markdownify as md
 from pydantic import BaseModel, Field, HttpUrl
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.shared.exceptions import McpError
+from mcp.types import (
+        ErrorData,
+        INTERNAL_ERROR
+        )
+
+DEFAULT_USER_AGENT= "ModelContextProtocol/1.0 (User-Specified; +https://modelcontextprotocol.io)"
 
 # Set up constants and logging
-default_log_level = os.environ.get("LOG_LEVEL", "DEBUG").upper()
-log_level = getattr(logging, default_log_level, logging.INFO)
+DEFAULT_LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG").upper()
 CACHE_DIR = os.environ.get("CACHE_DIR", os.path.expanduser("~/.cache/llms-txt-server"))
 SITES_LIST_FILE = os.path.join(CACHE_DIR, "sites.json")
+log_level = getattr(logging, DEFAULT_LOG_LEVEL, logging.INFO)
 
 # Ensure cache directory exists
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -78,16 +83,18 @@ class SiteDataAdapter(ABC):
         """Convert source item to standardized site entry format"""
         pass
 
-class KrishSiteDataAdapter(SiteDataAdapter):
+class LlmsTxtSiteDataAdapter(SiteDataAdapter):
     """Adapter for krish-adi/llmstxt-site data format"""
     def __init__(self, url: str = "https://raw.githubusercontent.com/krish-adi/llmstxt-site/refs/heads/main/data.json"):
         self.url = url
 
     async def fetch_data(self) -> List[Dict[str, Any]]:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(self.url)
-            if response.status_code == 200:
-                return response.json()
+        try:
+            # Use force_raw=True for JSON data
+            content, _ = await fetch_page(self.url, force_raw=True)
+            return json.loads(content)
+        except (McpError, json.JSONDecodeError) as e:
+            logger.error(f"Error fetching data from {self.url}: {e}")
             return []
 
     def convert_to_site_entry(self, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,16 +113,18 @@ class KrishSiteDataAdapter(SiteDataAdapter):
             "tokenCount": token_count
         }
 
-class DavidSiteDataAdapter(SiteDataAdapter):
+class LlmsTxtHubDataAdapter(SiteDataAdapter):
     """Adapter for thedaviddias/llms-txt-hub data format"""
     def __init__(self, url: str = "https://raw.githubusercontent.com/thedaviddias/llms-txt-hub/refs/heads/main/data/websites.json"):
         self.url = url
 
     async def fetch_data(self) -> List[Dict[str, Any]]:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(self.url)
-            if response.status_code == 200:
-                return response.json()
+        try:
+            # Use force_raw=True for JSON data
+            content, _ = await fetch_page(self.url, force_raw=True)
+            return json.loads(content)
+        except (McpError, json.JSONDecodeError) as e:
+            logger.error(f"Error fetching data from {self.url}: {e}")
             return []
 
     def convert_to_site_entry(self, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -130,8 +139,8 @@ class DavidSiteDataAdapter(SiteDataAdapter):
 async def fetch_and_merge_sites_data() -> List[Dict[str, Any]]:
     """Fetch data from multiple sources and merge them, removing duplicates"""
     adapters = [
-        KrishSiteDataAdapter(),
-        DavidSiteDataAdapter()
+        LlmsTxtSiteDataAdapter(),
+        LlmsTxtHubDataAdapter()
     ]
 
     all_entries = []
@@ -191,6 +200,43 @@ async def initialize_sites_list_from_sources() -> LlmsSitesList:
         # Fall back to empty list
         return LlmsSitesList()
 
+def extract_content_from_html(raw_page) -> str:
+    soup = BeautifulSoup(raw_page, 'html.parser')
+    # Remove scripts, styles, and other non-content elements
+    for tag in soup(['script', 'style', 'iframe', 'footer']):
+        tag.decompose()
+
+    # Convert to markdown
+    markdown_content = md(str(soup),
+                              default_title = False)
+    return markdown_content
+
+async def fetch_page(url: str, force_raw: bool = False) -> Tuple[str,
+                                                                 str]:
+    # Fetch from website
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = await client.get(url,
+                                        headers={"User-Agent":
+                                                 DEFAULT_USER_AGENT},
+                                        follow_redirects=True)
+        except Exception as e:
+            logger.error(f"Failed to fetch {url}: {e}")
+            raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to fetch {url}: {e!r}"))
+        if response.status_code >= 400:
+            logger.error(f"Failed to fetch {url}: status code {response.status_code}")
+            raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to fetch {url}: status code {response.status_code}"))
+
+        raw_content = response.text
+        content_type = response.headers.get("content-type", "")
+        is_html = ("text/html" in content_type or
+                   raw_content[:100].lstrip().startswith(("<!DOCTYPE html", "<html")))
+        if is_html and not force_raw:
+            return extract_content_from_html(raw_content), ""
+        return (
+            raw_content,
+            f"{content_type} cannot be converted to markdown, raw content:\n"
+        )
 
 def extract_domain(url: str) -> str:
     """Extract the domain from a URL."""
@@ -203,7 +249,7 @@ def get_cache_path(domain: str, file_type: str = "llms.txt") -> str:
     os.makedirs(domain_dir, exist_ok=True)
     return os.path.join(domain_dir, file_type)
 
-def fetch_llmstxt_with_cache(url_or_domain: str, force_refresh: bool = False) -> Tuple[Optional[str], bool]:
+async def fetch_llmstxt_with_cache(url_or_domain: str, force_refresh: bool = False) -> Tuple[Optional[str], bool]:
     """
     Fetch llms.txt file from a website and cache it.
 
@@ -236,73 +282,38 @@ def fetch_llmstxt_with_cache(url_or_domain: str, force_refresh: bool = False) ->
 
     # Fetch from website
     try:
-        with httpx.Client(timeout=10) as client:
-            response = client.get(url)
-            if response.status_code == 200:
-                content = response.text
-                # Cache the content
-                with open(cache_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                logger.info(f"Successfully fetched and cached llms.txt for {domain}")
-                return content, False
-            else:
-                logger.warning(f"Failed to fetch llms.txt from {url}, status code: {response.status_code}")
-                return None, False
-    except Exception as e:
+        # Use force_raw=True because llms.txt is not HTML
+        content, _ = await fetch_page(url, force_raw=True)
+
+        # Cache the content
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        logger.info(f"Successfully fetched and cached llms.txt for {domain}")
+        return content, False
+    except McpError as e:
         logger.error(f"Error fetching llms.txt from {url}: {e}")
         return None, False
 
 
-def convert_webpage_to_markdown(url: str, force_refresh: bool = False) -> Tuple[Optional[str], bool]:
+async def convert_webpage_to_markdown(url: str) -> str:
     """
-    Fetch a webpage and convert it to Markdown.
+    Fetch a webpage and convert it to Markdown without caching.
 
     Args:
         url: URL of the webpage to fetch
-        force_refresh: Whether to force a refresh of the cache
 
     Returns:
-        Tuple of (content, from_cache)
+        Converted markdown content
     """
-    domain = extract_domain(url)
-    cache_path = get_cache_path(domain, "fallback.md")
-
-    # Check if cached version exists and not forcing refresh
-    if os.path.exists(cache_path) and not force_refresh:
-        try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                logger.info(f"Using cached markdown for {url}")
-                return content, True
-        except Exception as e:
-            logger.error(f"Error reading cached markdown: {e}")
-
-    # Fetch and convert webpage
     try:
-     with httpx.Client(timeout=10) as client:
-        response = client.get(url)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # Remove scripts, styles, and other non-content elements
-            for tag in soup(['script', 'style', 'iframe', 'footer']):
-                tag.decompose()
-
-            # Convert to markdown
-            markdown_content = md(str(soup),
-                                  default_title = True)
-
-            # Cache the content
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                f.write(markdown_content)
-
-            logger.info(f"Successfully converted and cached webpage {url} to markdown")
-            return markdown_content, False
-        else:
-            logger.warning(f"Failed to fetch webpage {url}, status code: {response.status_code}")
-            return None, False
-    except Exception as e:
+        # fetch_page already handles HTML to Markdown conversion
+        content, _ = await fetch_page(url)
+        logger.info(f"Successfully converted webpage {url} to markdown")
+        return content
+    except McpError as e:
         logger.error(f"Error fetching webpage {url}: {e}")
-        return None, False
+        raise e
+
 
 def is_domain_in_sites_list(domain: str, sites_list: LlmsSitesList) -> Optional[LlmsSiteEntry]:
     """Check if a domain is in the sites list."""
@@ -311,7 +322,7 @@ def is_domain_in_sites_list(domain: str, sites_list: LlmsSitesList) -> Optional[
             return site
     return None
 
-def check_llms_support(url_or_domain: str) -> Dict:
+async def check_llms_support(url_or_domain: str) -> Dict:
     """Check if a website supports llms.txt."""
     # Determine if it's a URL or domain
     if url_or_domain.startswith(('http://', 'https://')):
@@ -332,12 +343,17 @@ def check_llms_support(url_or_domain: str) -> Dict:
             "fromKnownList": True
         }
 
- # Try to check if the website has llms.txt
+    # Try to check if the website has llms.txt
     try:
         url = f"https://{domain}/llms.txt"
-        with httpx.Client(timeout=5) as client:
-            response = client.head(url)
-            if response.status_code == 200:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.head(
+                url,
+                headers={"User-Agent": DEFAULT_USER_AGENT},
+                follow_redirects=True
+            )
+            if response.status_code < 400:
+                # Add to sites list
                 new_site = LlmsSiteEntry(
                     domain=domain,
                     llmsTxtUrl=url,
@@ -396,7 +412,7 @@ async def refresh_sites_list() -> Dict:
         }
 
 @mcp.tool()
-def check_llms_support_tool(url_or_domain: str) -> Dict:
+async def check_llms_support_tool(url_or_domain: str) -> Dict:
     """
     Check if a website supports llms.txt.
 
@@ -406,10 +422,10 @@ def check_llms_support_tool(url_or_domain: str) -> Dict:
     Returns:
         Information about llms.txt support
     """
-    return check_llms_support(url_or_domain)
+    return await check_llms_support(url_or_domain)
 
 @mcp.tool()
-def download_llms_txt(url_or_domain: str, force_refresh: bool = False) -> Dict:
+async def download_llms_txt(url_or_domain: str, force_refresh: bool = False) -> Dict:
     """
     Download llms.txt from a website.
 
@@ -420,7 +436,7 @@ def download_llms_txt(url_or_domain: str, force_refresh: bool = False) -> Dict:
     Returns:
         Content of llms.txt or error information
     """
-    result = check_llms_support(url_or_domain)
+    result = await check_llms_support(url_or_domain)
 
     if not result.get("supported", False):
         return {
@@ -430,7 +446,7 @@ def download_llms_txt(url_or_domain: str, force_refresh: bool = False) -> Dict:
             "fallbackAvailable": True
         }
 
-    content, from_cache = fetch_llmstxt_with_cache(
+    content, from_cache = await fetch_llmstxt_with_cache(
         result.get("llmsTxtUrl", f"https://{result.get('domain')}/llms.txt"),
         force_refresh
     )
@@ -451,13 +467,12 @@ def download_llms_txt(url_or_domain: str, force_refresh: bool = False) -> Dict:
         }
 
 @mcp.tool()
-def convert_page_to_md(url: str, force_refresh: bool = False) -> Dict:
+async def convert_page_to_md(url: str) -> Dict:
     """
     Convert a webpage to Markdown.
 
     Args:
         url: URL of the webpage to convert
-        force_refresh: Whether to force a refresh of the cache
 
     Returns:
         Markdown content or error information
@@ -465,19 +480,28 @@ def convert_page_to_md(url: str, force_refresh: bool = False) -> Dict:
     if not url.startswith(('http://', 'https://')):
         url = f"https://{url}"
 
-    content, from_cache = convert_webpage_to_markdown(url, force_refresh)
+    try:
+        # Check if the website supports llms.txt first
+        support_result = await check_llms_support(url)
 
-    if content:
+        if support_result.get("supported", False):
+            # If it supports llms.txt, redirect to download_llms_txt
+            return await download_llms_txt(url)
+
+        # If not supported, convert on-demand without caching
+        content = await convert_webpage_to_markdown(url)
+
         return {
             "success": True,
             "content": content,
             "url": url,
-            "fromCache": from_cache
+            "fromCache": False,
+            "note": "This website does not support llms.txt. Content converted from HTML to Markdown."
         }
-    else:
+    except Exception as e:
         return {
             "success": False,
-            "error": "Failed to convert webpage to Markdown",
+            "error": f"Error converting webpage: {str(e)}",
             "url": url
         }
 

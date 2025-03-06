@@ -13,6 +13,7 @@ from llms_txt_server.server import (
     check_llms_support,
     initialize_sites_list,
     save_sites_list,
+    fetch_page,  # Add import for the new fetch_page function
     LlmsSitesList,
     LlmsSiteEntry
 )
@@ -92,69 +93,55 @@ def test_initialize_and_save_sites_list(temp_cache_dir):
     assert loaded_list.sites[0].domain == "test.com"
 
 # Test fetching llms.txt with mocked responses
-def test_fetch_llmstxt_with_cache(temp_cache_dir):
+@pytest.mark.asyncio
+async def test_fetch_llmstxt_with_cache(temp_cache_dir):
     domain = "example.com"
-    _= f"https://{domain}/llms.txt"
+    url = f"https://{domain}/llms.txt"
 
-    # Mock successful response using httpx
-    with mock.patch('httpx.Client') as mock_client:
-        mock_response = mock.MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = MOCK_LLMS_TXT
-        mock_client.return_value.__enter__.return_value.get.return_value = mock_response
+    # Mock fetch_page function instead of httpx client
+    with mock.patch('llms_txt_server.server.fetch_page') as mock_fetch:
+        mock_fetch.return_value = (MOCK_LLMS_TXT, "")
 
         # Test fetching from website
-        content, from_cache = fetch_llmstxt_with_cache(domain)
+        content, from_cache = await fetch_llmstxt_with_cache(domain)
         assert content == MOCK_LLMS_TXT
         assert from_cache is False
+        mock_fetch.assert_called_once_with(url, force_raw=True)
 
     # Test fetching from cache
-    with mock.patch('httpx.Client') as mock_client:
-        mock_client.return_value.__enter__.return_value.get.side_effect = Exception("Should not reach here")
-        content, from_cache = fetch_llmstxt_with_cache(domain)
+    with mock.patch('llms_txt_server.server.fetch_page') as mock_fetch:
+        mock_fetch.side_effect = Exception("Should not reach here")
+        content, from_cache = await fetch_llmstxt_with_cache(domain)
         assert content == MOCK_LLMS_TXT
         assert from_cache is True
+        mock_fetch.assert_not_called()
 
     # Test force refresh
-    with mock.patch('httpx.Client') as mock_client:
-        mock_response = mock.MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = MOCK_LLMS_TXT + "\nUpdated"
-        mock_client.return_value.__enter__.return_value.get.return_value = mock_response
-
-        content, from_cache = fetch_llmstxt_with_cache(domain, force_refresh=True)
+    with mock.patch('llms_txt_server.server.fetch_page') as mock_fetch:
+        mock_fetch.return_value = (MOCK_LLMS_TXT + "\nUpdated", "")
+        content, from_cache = await fetch_llmstxt_with_cache(domain, force_refresh=True)
         assert content == MOCK_LLMS_TXT + "\nUpdated"
         assert from_cache is False
+        mock_fetch.assert_called_once_with(url, force_raw=True)
 
-# Test converting webpage to markdown
-def test_convert_webpage_to_markdown(temp_cache_dir):
+# Test converting webpage to markdown - no caching now
+@pytest.mark.asyncio
+async def test_convert_webpage_to_markdown():
     url = "https://example.com"
 
-    # Mock successful response using httpx
-    with mock.patch('httpx.Client') as mock_client:
-        mock_response = mock.MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = MOCK_HTML
-        mock_client.return_value.__enter__.return_value.get.return_value = mock_response
+    # Mock fetch_page function
+    with mock.patch('llms_txt_server.server.fetch_page') as mock_fetch:
+        expected_md = "# Test Page\n\nThis is a test paragraph."
+        mock_fetch.return_value = (expected_md, "")
 
-        # Test converting from website
-        content, from_cache = convert_webpage_to_markdown(url)
-        assert content is not None
-        assert "Test Page" in content
-        assert "This is a test paragraph." in content
-        assert "console.log" not in content
-        assert from_cache is False
-
-    # Test fetching from cache
-    with mock.patch('httpx.Client') as mock_client:
-        mock_client.return_value.__enter__.return_value.get.side_effect = Exception("Should not reach here")
-        content, from_cache = convert_webpage_to_markdown(url)
-        assert content is not None
-        assert "Test Page" in content
-        assert from_cache is True
+        # Test conversion
+        content = await convert_webpage_to_markdown(url)
+        assert content == expected_md
+        mock_fetch.assert_called_once_with(url)
 
 # Test checking if a website supports llms.txt
-def test_check_llms_support(temp_cache_dir):
+@pytest.mark.asyncio
+async def test_check_llms_support(temp_cache_dir):
     domain = "example.com"
 
     # Setup sites list with known domain
@@ -162,29 +149,69 @@ def test_check_llms_support(temp_cache_dir):
         json.dump(MOCK_SITES_LIST, f)
 
     # Test with known domain
-    result = check_llms_support(domain)
+    result = await check_llms_support(domain)
     assert result["supported"] is True
     assert result["domain"] == domain
     assert result["fromKnownList"] is True
 
     # Test with unknown domain that has llms.txt
-    with mock.patch('httpx.Client') as mock_client:
+    with mock.patch('httpx.AsyncClient') as mock_client:
+        mock_instance = mock.MagicMock()
         mock_response = mock.MagicMock()
         mock_response.status_code = 200
-        mock_client.return_value.__enter__.return_value.head.return_value = mock_response
+        mock_instance.__aenter__.return_value.head.return_value = mock_response
+        mock_client.return_value = mock_instance
 
-        result = check_llms_support("unknown.com")
+        result = await check_llms_support("unknown.com")
         assert result["supported"] is True
         assert result["domain"] == "unknown.com"
         assert result["fromKnownList"] is False
 
     # Test with domain that doesn't have llms.txt
-    with mock.patch('httpx.Client') as mock_client:
+    with mock.patch('httpx.AsyncClient') as mock_client:
+        mock_instance = mock.MagicMock()
         mock_response = mock.MagicMock()
         mock_response.status_code = 404
-        mock_client.return_value.__enter__.return_value.head.return_value = mock_response
+        mock_instance.__aenter__.return_value.head.return_value = mock_response
+        mock_client.return_value = mock_instance
 
-        result = check_llms_support("no-llms.com")
+        result = await check_llms_support("no-llms.com")
         assert result["supported"] is False
         assert result["domain"] == "no-llms.com"
         assert result["fromKnownList"] is False
+
+# Test fetch_page function
+@pytest.mark.asyncio
+async def test_fetch_page():
+    url = "https://example.com"
+
+    # Test HTML conversion
+    with mock.patch('httpx.AsyncClient') as mock_client:
+        mock_instance = mock.MagicMock()
+        mock_response = mock.MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = MOCK_HTML
+        mock_response.headers = {"content-type": "text/html"}
+        mock_instance.__aenter__.return_value.get.return_value = mock_response
+        mock_client.return_value = mock_instance
+
+        content, message = await fetch_page(url)
+        assert content is not None
+        assert "Test Page" in content
+        assert "This is a test paragraph." in content
+        assert "console.log" not in content
+        assert message == ""
+
+    # Test raw content fetching
+    with mock.patch('httpx.AsyncClient') as mock_client:
+        mock_instance = mock.MagicMock()
+        mock_response = mock.MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = MOCK_LLMS_TXT
+        mock_response.headers = {"content-type": "text/plain"}
+        mock_instance.__aenter__.return_value.get.return_value = mock_response
+        mock_client.return_value = mock_instance
+
+        content, message = await fetch_page(url, force_raw=True)
+        assert content == MOCK_LLMS_TXT
+        assert "text/plain" in message
