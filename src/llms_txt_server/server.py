@@ -451,7 +451,9 @@ def list_llms_websites() -> str:
 # Add a new tool to refresh sites list
 @mcp.tool()
 async def refresh_sites_list() -> Dict:
-    """Refresh the sites list from external sources"""
+    """
+    Refresh the list of sites that support llms.txt from external sources
+    """
     try:
         sites_list = await initialize_sites_list_from_sources()
         return {
@@ -479,9 +481,9 @@ async def check_llms_support_tool(url_or_domain: str) -> Dict:
     return await check_llms_support(url_or_domain)
 
 @mcp.tool()
-async def download_llms_txt(url_or_domain: str, force_refresh: bool = False) -> Dict:
+async def get_llms_txt(url_or_domain: str, force_refresh: bool = False) -> Dict:
     """
-    Download llms.txt from a website.
+    Get llms.txt from a website.
 
     Args:
         url_or_domain: URL or domain to download llms.txt from
@@ -523,7 +525,7 @@ async def download_llms_txt(url_or_domain: str, force_refresh: bool = False) -> 
 @mcp.tool()
 async def convert_page_to_md(url: str) -> Dict:
     """
-    Convert a webpage to Markdown.
+    Fetch the url and try to convert the webpage to Markdown.
 
     Args:
         url: URL of the webpage to convert
@@ -540,7 +542,7 @@ async def convert_page_to_md(url: str) -> Dict:
 
         if support_result.get("supported", False):
             # If it supports llms.txt, redirect to download_llms_txt
-            return await download_llms_txt(url)
+            return await get_llms_txt(url)
 
         # If not supported, convert on-demand without caching
         content = await convert_webpage_to_markdown(url)
@@ -559,19 +561,25 @@ async def convert_page_to_md(url: str) -> Dict:
             "url": url
         }
 
-@mcp.prompt()
-def check_website_llmstxt(url_or_domain: str) -> str:
-    """Create a prompt to check if a website supports llms.txt."""
+@mcp.prompt(name="fetch_url", description="Create a prompt to fetch a URL that prefer domain's llms.txt if available")
+def fetch_url(url_or_domain: str) -> str:
     return f"""
-I'll check if the website {url_or_domain} supports llms.txt, which is a standardized format for providing content optimized for large language models.
+Check if the website {url_or_domain} supports llms.txt, which is a standardized format for providing content optimized for large language models.
 
-If it supports llms.txt, I'll retrieve that content for you. Otherwise, I'll convert the webpage to Markdown as a fallback.
+If it supports llms.txt, retrieve that content. Otherwise, convert the webpage to Markdown as a fallback.
 
-Would you like me to:
-1. Just check if the website supports llms.txt
-2. Retrieve the llms.txt content (if available)
-3. Convert the webpage to Markdown
-    """
+check if the website supports llms.txt
+Yes -> Retrieve the llms.txt content (if available)
+No -> fetch the URL and convert webpage to Markdown
+
+Tools:
+This server provides several tools:
+"check_llms_support_tool": Check if a website supports llms.txt.
+"list_llms_websites": List all known websites that support llms.txt.
+"refresh_sites_list": Refresh the sites list from external sources
+"get_llms_txt": Download llms.txt from a website and return its content.
+"convert_page_to_md": Fetch URL and a webpage to Markdown.
+"""
 
 def main():
     """Run the MCP server."""
