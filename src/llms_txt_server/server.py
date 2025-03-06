@@ -441,7 +441,7 @@ async def check_llms_support(url_or_domain: str) -> Dict:
 # ------------  MCP server code ----------
 mcp = FastMCP("llms-txt-server")
 
-@mcp.resource("llmstxt://list")
+@mcp.tool()
 def list_llms_websites() -> str:
     """List all known websites that support llms.txt."""
     sites_list = initialize_sites_list()
