@@ -568,17 +568,9 @@ Check if the website {url_or_domain} supports llms.txt, which is a standardized 
 
 If it supports llms.txt, retrieve that content. Otherwise, convert the webpage to Markdown as a fallback.
 
-check if the website supports llms.txt
-Yes -> Retrieve the llms.txt content (if available)
-No -> fetch the URL and convert webpage to Markdown
-
-Tools:
-This server provides several tools:
-"check_llms_support_tool": Check if a website supports llms.txt.
-"list_llms_websites": List all known websites that support llms.txt.
-"refresh_sites_list": Refresh the sites list from external sources
-"get_llms_txt": Download llms.txt from a website and return its content.
-"convert_page_to_md": Fetch URL and a webpage to Markdown.
+check if the website supports llms.txt:
+If yes, retrieve the llms.txt content (if available)
+If not, fetch the URL and convert webpage to Markdown
 """
 
 def main():
